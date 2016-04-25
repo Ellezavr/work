@@ -1,0 +1,500 @@
+SELECT  al.day_dt,--день-цифрой без перевода таймзоны
+	al.t_id, --id записи в базе cashdesk_timesheet
+	al.char_opendt,--дата начала смены.текстовый формат для примечания
+	al.char_closedt,--дата конца смены,текстовый формат для примечания
+	al.event,--событие(ЛЧ или собрание)
+	al.cash_ot,	--режим работы ОТ с учетом должности сотрудника(у охранников другой режим),текстовый формат для примечания			
+	al.cash_do,	--режим работы ДО с учетом должности сотрудника(у охранников другой режим),текстовый формат для примечания			
+	al.shift_change,--пересменка, текстовый формат для примечания				
+	al.champ,--ЛЧ.булевский формат
+	CASE
+		WHEN cash_ot_formul < cash_do_formul AND al.cash_ot_formul <> '00:00' AND cash_night = true
+		THEN 1
+		ELSE 0
+	END as halves,
+	al.down /60 as down,
+
+	CASE --высчитываем коэфициент сотрудника за день
+		WHEN al.pos = 1 -- если охранники
+		THEN EXTRACT(EPOCH FROM (( --выбираем количество секунд по unix-формату
+			case
+				when al.cash_ot_formul = '00:00' --если полносуточный охранник(24 часа)											
+				then -- при открытии и закрытии дается 5 минут +- форы от фактического времени 
+					CASE --костыль для 2,66
+						WHEN
+							((CASE 
+								 WHEN (al.closedt::time >= al.shift_change_formul - interval '5 minute' AND al.closedt::time <= al.shift_change_formul + interval '5 minute') OR (al.event2 = 1)																									
+								 THEN al.tricky_formula_0 --тогда пересменка														
+								 ELSE al.closedt --иначе по факту
+							 END)				
+							- 
+							(CASE 
+								 WHEN (al.opendt::time >= al.shift_change_formul - interval '5 minute' AND al.opendt::time <= al.shift_change_formul + interval '5 minute') OR (al.event = 1)																									
+								 THEN al.tricky_formula_1 --тогда пересменка														
+								 ELSE al.opendt	--иначе по факту
+							 END))
+							 = '1 day'										
+						THEN '23:54:00'
+						ELSE
+							(CASE 
+								 WHEN (al.closedt::time >= al.shift_change_formul - interval '5 minute' AND al.closedt::time <= al.shift_change_formul + interval '5 minute') OR (al.event2 = 1)																								
+								 THEN al.tricky_formula_0 --тогда пересменка														
+								 ELSE al.closedt --иначе по факту
+							 END)				
+							- 
+							(CASE 
+								 WHEN (al.opendt::time >= al.shift_change_formul - interval '5 minute' AND al.opendt::time <= al.shift_change_formul + interval '5 minute') OR (al.event = 1)																									
+								 THEN al.tricky_formula_1 --тогда пересменка														
+								 ELSE al.opendt	--иначе по факту
+							 END)
+					END										 
+				when al.cash_ot_formul < al.cash_do_formul AND al.cash_night = true --если половинчатый охранник в ночной кассе и режим ОТ меньше режима ДО 											
+				then
+					case 
+						when al.opendt::time < al.closedt::time --если дневная половина
+						then 
+							(CASE --5 минут форы. или если охранника по ошибке закрыли на следующий день
+								WHEN (al.closedt::time >= al.cash_do_formul - interval '5 minute' AND al.closedt::time <= al.cash_do_formul + interval '5 minute') OR (EXTRACT(day from al.opendt) <> EXTRACT(day from al.closedt))																						
+								THEN al.cash_do_formul --режим работы кассы ДО																											
+								ELSE al.closedt::time --иначе брать по факту
+							END)
+							- 
+							(CASE -- 5 минут форы на опоздание +- или собрание
+								WHEN (al.opendt::time >= al.cash_ot_formul - interval '5 minute' AND al.opendt::time <= al.cash_ot_formul + interval '5 minute') OR (al.event = 1)
+								THEN al.cash_ot_formul -- тогда по режиму работы																 
+								ELSE al.opendt::time --иначе фактическое время - 3 минуты форы
+							 END)
+						else --если ночная половина и также 5 минут форы +-				
+							(CASE 
+								WHEN (al.closedt::time >= al.cash_ot_formul - interval '5 minute' AND al.closedt::time <= al.cash_ot_formul + interval '5 minute') OR (al.event2 = 1) -- или собрание
+								THEN al.tricky_formula_22 --режим работы
+								ELSE al.closedt --иначе фактическое время 
+							 END)
+							- 
+							(CASE 
+								WHEN al.opendt::time >= al.cash_do_formul - interval '5 minute' AND al.opendt::time <= al.cash_do_formul + interval '5 minute'
+								THEN al.tricky_formula_2 --режим работы
+								ELSE al.opendt --иначе фактическое время
+							 END)				
+					end
+				when al.cash_ot_formul < al.cash_do_formul and al.cash_night = false --если дневной охранник											
+				then
+					(CASE 
+						WHEN (al.closedt::time > CASE -- или если у дневной кассы з-отчет закрылся на следующий еднь
+													WHEN al.champ = true --ЛЧ
+													THEN '21:44'
+													ELSE al.cash_do_formul
+												END				
+												OR EXTRACT(day from al.opendt) <> EXTRACT(day from al.closedt)) OR (al.just_e = 1)--закрытие на след. день, или есть объяснение опоздания																						
+						THEN											
+							 CASE 
+								WHEN al.champ = true --ЛЧ
+								THEN '21:45' -- то считать до 21:45
+								ELSE al.cash_do_formul
+							END												
+						ELSE al.closedt::time --иначе брать по факту
+					END)
+					- 
+					(CASE -- 3 минуты форы на опоздание
+						 WHEN (al.opendt::time - interval '3 minute' <= al.cash_ot_formul OR al.event = 1) OR (al.just_s = 1) --или собрание, или есть объяснение опоздания
+						 THEN al.cash_ot_formul 
+						 ELSE al.opendt::time - interval '3 minute' --иначе фактическое время - 3 минуты форы
+					 END)				
+				else --поночные охранники										
+					(CASE 
+						WHEN (al.closedt::time > al.cash_do_formul) OR (al.just_e = 1) OR (al.event2 = 1) --или есть объяснение опоздания																						
+						THEN al.tricky_formula_3												
+						ELSE al.closedt --иначе брать по факту
+					END)
+					- 
+					(CASE -- 3 минуты форы на опоздание
+						WHEN (al.opendt::time - interval '3 minute' <= al.cash_ot_formul) OR (al.just_s = 1) --или есть объяснение опоздания
+						THEN al.tricky_formula_4 
+						ELSE al.opendt - interval '3 minute' --иначе фактическое время - 3 минуты форы
+					 END)
+				end		
+					 )))
+		ELSE CASE -- все остальные сотрудники. отнимаем время конца от времени начала рабочей смены
+				WHEN al.cash_night = true --ночные кассы
+				THEN EXTRACT(EPOCH FROM (
+					case
+						when al.cash_ot_formul = '00:00' --если полносуточный кассир											
+						then --фора +- 5минут
+							CASE --костыль для 2,66
+								WHEN
+									((CASE 
+										 WHEN (al.closedt::time >= al.shift_change_formul - interval '5 minute' AND al.closedt::time <= al.shift_change_formul + interval '5 minute') OR (al.event2 = 1)																								
+										 THEN al.tricky_formula_0 --тогда пересменка														
+										 ELSE al.closedt --иначе по факту
+									 END)				
+									- 
+									(CASE 
+										 WHEN (al.opendt::time >= al.shift_change_formul - interval '5 minute' AND al.opendt::time <= al.shift_change_formul + interval '5 minute') OR (al.event = 1)																									
+										 THEN al.tricky_formula_1 --тогда пересменка														
+										 ELSE al.opendt	--иначе по факту
+									 END))
+									 = '1 day'
+								THEN '23:54:00'
+								ELSE 
+									(CASE 
+										 WHEN (al.closedt::time >= al.shift_change_formul - interval '5 minute' AND al.closedt::time <= al.shift_change_formul + interval '5 minute') OR (al.event2 = 1)																								
+										 THEN al.tricky_formula_0 --тогда пересменка														
+										 ELSE al.closedt --иначе по факту
+									 END)				
+									- 
+									(CASE 
+										 WHEN al.opendt::time >= al.shift_change_formul - interval '5 minute' AND al.opendt::time <= al.shift_change_formul + interval '5 minute' OR (al.event = 1)																								
+										 THEN al.tricky_formula_1 --тогда пересменка														
+										 ELSE al.opendt	--иначе по факту
+									 END)
+							END
+						when al.cash_ot_formul < al.cash_do_formul --если половинчатый кассир - ночная касса и режим ОТ меньше режима ДО 
+						then
+							case 
+								when al.opendt::time < al.closedt::time --если дневная половина
+								then
+									(CASE --5 минут форы. или если по ошибке закрыли на следующий день
+										 WHEN (al.closedt::time >= al.cash_do_formul - interval '5 minute' AND al.closedt::time <= al.cash_do_formul + interval '5 minute') OR (EXTRACT(day from al.opendt) <> EXTRACT(day from al.closedt))																						
+										 THEN al.cash_do_formul --режим работы кассы ДО																											
+										 ELSE al.closedt::time --иначе брать по факту
+									 END)
+									- 
+									(CASE -- 5 минут форы на опоздание +- или собрание
+										 WHEN (al.opendt::time >= al.cash_ot_formul - interval '5 minute' AND al.opendt::time <= al.cash_ot_formul + interval '5 minute') OR (al.event = 1)
+										 THEN al.cash_ot_formul -- тогда по режиму работы																 
+										 ELSE al.opendt::time --иначе фактическое время - 3 минуты форы
+									 END)
+								else --если ночная половина				
+									(CASE 
+										 WHEN (al.closedt::time >= al.cash_ot_formul - interval '5 minute' AND al.closedt::time <= al.cash_ot_formul + interval '5 minute') OR (al.event2 = 1) -- или собрание
+										 THEN al.tricky_formula_55 --режим работы
+										 ELSE al.closedt --иначе фактическое время 
+									 END)
+									- 
+									(CASE 
+										 WHEN al.opendt::time >= al.cash_do_formul - interval '5 minute' AND al.opendt::time <= al.cash_do_formul + interval '5 minute'
+										 THEN al.tricky_formula_5 --режим работы
+										 ELSE al.opendt --иначе фактическое время
+									 END)
+							end
+						end
+				))
+				ELSE -- если дневная
+					EXTRACT(EPOCH FROM((
+						CASE 
+							WHEN (al.closedt::time > CASE 
+														WHEN al.champ = true --ЛЧ
+														THEN '21:44'
+														ELSE al.cash_do_formul
+													END
+								 OR EXTRACT(day from al.opendt) <> EXTRACT(day from al.closedt)) OR (al.just_e = 1)-- или если у дневной кассы з-отчет закрылся на следующий день, или есть объяснение опоздания											
+							THEN
+								CASE 
+									WHEN al.champ = true --ЛЧ
+									THEN '21:45' -- то считать до 21:45
+									ELSE al.cash_do_formul
+								END
+							ELSE al.closedt::time --иначе брать по факту
+						END)
+						- 
+						(CASE -- 3 минуты форы на опоздание
+							 WHEN (al.opendt::time - interval '3 minute' <= al.cash_ot_formul OR al.event = 1) OR (al.just_s = 1) --или собрание, или есть объяснение опоздания															
+							 THEN al.cash_ot_formul 
+							 ELSE al.opendt::time - interval '3 minute' --иначе фактическое время - 3 минуты форы
+						 END)
+					  ))
+				END
+	END /3600/9 as koef				
+FROM
+
+(SELECT base.day_dt,
+		base.real_dt,
+		base.char_opendt,
+		base.char_closedt,
+		base.opendt,
+		base.closedt,
+		meeting.event,
+		meeting2.event event2,				
+		base.pos,
+		base.t_id,
+		coalesce(downtime_s.inter, 0) + coalesce(downtime_e.inter, 0) as down,
+		case when coalesce(justify_s.inter, 0) > 0 then 1 else 0 end as just_s,
+		case when coalesce(justify_e.inter, 0) > 0 then 1 else 0 end as just_e,
+
+		to_char(CASE --режим работы кассы ОТ для вывода в примечании
+					WHEN base.pos = 1
+					THEN
+						CASE 
+							WHEN mode_dop.securmode_from is not null 
+							THEN mode_dop.securmode_from 
+							ELSE mode_base.securmode_from 
+						END
+					ELSE
+						CASE 
+							WHEN mode_dop.cashmode_from is not null 
+							THEN mode_dop.cashmode_from 
+							ELSE mode_base.cashmode_from 
+						END
+				END
+		, 'HH24:MI') as cash_ot,
+
+		to_char(CASE --режим работы кассы ДО для вывода в примечании
+					WHEN base.pos = 1
+					THEN
+						CASE 
+							WHEN mode_dop.securmode_to is not null 
+							THEN mode_dop.securmode_to 
+							ELSE mode_base.securmode_to 
+						END
+					ELSE
+						CASE 
+							WHEN mode_dop.cashmode_to is not null 
+							THEN mode_dop.cashmode_to 
+							ELSE mode_base.cashmode_to 
+						END
+				END
+		, 'HH24:MI') as cash_do,
+
+		to_char(CASE --пересменка для вывода 
+					WHEN mode_dop.shift_change is not null 
+					THEN mode_dop.shift_change 
+					ELSE mode_base.shift_change 
+				END							
+		, 'HH24:MI') as shift_change,
+
+		CASE --ЛЧ
+			WHEN lchampion.event = 0
+			THEN
+				CASE 
+					WHEN mode_dop.champions_league is not null 
+					THEN mode_dop.champions_league 
+					ELSE mode_base.champions_league 
+				END
+			ELSE false
+		END	as champ,
+
+		CASE --режим работы кассы ОТ для формул в запросе
+			WHEN base.pos = 1
+			THEN
+				CASE 
+					WHEN mode_dop.securmode_from is not null 
+					THEN mode_dop.securmode_from 
+					ELSE mode_base.securmode_from 
+				END
+			ELSE
+				CASE 
+					WHEN mode_dop.cashmode_from is not null 
+					THEN mode_dop.cashmode_from 
+					ELSE mode_base.cashmode_from 
+				END
+		END as cash_ot_formul,
+
+		CASE --режим работы кассы ДО для формул в запросе
+			WHEN base.pos = 1
+			THEN
+				CASE 
+					WHEN mode_dop.securmode_to is not null 
+					THEN mode_dop.securmode_to 
+					ELSE mode_base.securmode_to 
+				END
+			ELSE
+				CASE 
+					WHEN mode_dop.cashmode_to is not null 
+					THEN mode_dop.cashmode_to 
+					ELSE mode_base.cashmode_to 
+				END
+		END as cash_do_formul,
+
+		CASE --пересменка для формул
+			WHEN mode_dop.shift_change is not null 
+			THEN mode_dop.shift_change 
+			ELSE mode_base.shift_change 
+		END as shift_change_formul,
+
+		CASE --если ночная касса
+			WHEN mode_dop.night is not null 
+			THEN mode_dop.night 
+			ELSE mode_base.night 
+		END as cash_night,
+
+		CASE --пересменка на закрытие для полносуточных работников
+			WHEN mode_dop.shift_change is not null 
+			THEN to_timestamp(to_char(base.closedt, 'yyyy.mm.dd ') || to_char(mode_dop.shift_change, 'HH24:MI'), 'yyyy.mm.dd HH24:MI') 
+			ELSE to_timestamp(to_char(base.closedt, 'yyyy.mm.dd ') || to_char(mode_base.shift_change, 'HH24:MI'), 'yyyy.mm.dd HH24:MI') 
+		END as tricky_formula_0,
+
+		CASE --пересменка на открытие для полносуточных работников
+			WHEN mode_dop.shift_change is not null 
+			THEN to_timestamp(to_char(base.opendt, 'yyyy.mm.dd ') || to_char(mode_dop.shift_change, 'HH24:MI'), 'yyyy.mm.dd HH24:MI') 
+			ELSE to_timestamp(to_char(base.opendt, 'yyyy.mm.dd ') || to_char(mode_base.shift_change, 'HH24:MI'), 'yyyy.mm.dd HH24:MI') 
+		END as tricky_formula_1,
+
+		CASE -- тогда по режиму работы
+			WHEN mode_dop.securmode_to is not null 
+			THEN to_timestamp(to_char(base.opendt, 'yyyy.mm.dd ') || to_char(mode_dop.securmode_to, 'HH24:MI'), 'yyyy.mm.dd HH24:MI') 
+			ELSE to_timestamp(to_char(base.opendt, 'yyyy.mm.dd ') || to_char(mode_base.securmode_to, 'HH24:MI'), 'yyyy.mm.dd HH24:MI')
+		END as tricky_formula_2,
+
+		CASE -- тогда по режиму работы
+			WHEN mode_dop.securmode_from is not null 
+			THEN to_timestamp(to_char(base.closedt, 'yyyy.mm.dd ') || to_char(mode_dop.securmode_from, 'HH24:MI'), 'yyyy.mm.dd HH24:MI') 
+			ELSE to_timestamp(to_char(base.closedt, 'yyyy.mm.dd ') || to_char(mode_base.securmode_from, 'HH24:MI'), 'yyyy.mm.dd HH24:MI')
+		END as tricky_formula_22,
+
+		CASE --то крайняя точка до режима фактического
+			WHEN mode_dop.securmode_to is not null 
+			THEN to_timestamp(to_char(base.closedt, 'yyyy.mm.dd ') || to_char(mode_dop.securmode_to, 'HH24:MI'), 'yyyy.mm.dd HH24:MI')
+			ELSE to_timestamp(to_char(base.closedt, 'yyyy.mm.dd ') || to_char(mode_base.securmode_to, 'HH24:MI'), 'yyyy.mm.dd HH24:MI') 
+		END as tricky_formula_3,
+
+		CASE -- тогда по режиму работу
+			WHEN mode_dop.securmode_from is not null 
+			THEN to_timestamp(to_char(base.opendt, 'yyyy.mm.dd ') || to_char(mode_dop.securmode_from, 'HH24:MI'), 'yyyy.mm.dd HH24:MI') 
+			ELSE to_timestamp(to_char(base.opendt, 'yyyy.mm.dd ') || to_char(mode_base.securmode_from, 'HH24:MI'), 'yyyy.mm.dd HH24:MI')
+		END as tricky_formula_4,
+
+		CASE -- тогда по режиму работы
+			WHEN mode_dop.cashmode_to is not null 
+			THEN to_timestamp(to_char(base.opendt, 'yyyy.mm.dd ') || to_char(mode_dop.cashmode_to, 'HH24:MI'), 'yyyy.mm.dd HH24:MI') 
+			ELSE to_timestamp(to_char(base.opendt, 'yyyy.mm.dd ') || to_char(mode_base.cashmode_to, 'HH24:MI'), 'yyyy.mm.dd HH24:MI')
+		END as tricky_formula_5,
+
+		CASE -- тогда по режиму работы
+			WHEN mode_dop.cashmode_from is not null 
+			THEN to_timestamp(to_char(base.closedt, 'yyyy.mm.dd ') || to_char(mode_dop.cashmode_from, 'HH24:MI'), 'yyyy.mm.dd HH24:MI') 
+			ELSE to_timestamp(to_char(base.closedt, 'yyyy.mm.dd ') || to_char(mode_base.cashmode_from, 'HH24:MI'), 'yyyy.mm.dd HH24:MI')
+		END as tricky_formula_55
+
+	FROM(SELECT distinct EXTRACT(day from t.opendt) day_dt,
+			t.opendt::date real_dt,
+			first_value(to_char(timezone('Europe/Kiev', t.opendt::timestamptz), 'HH24:MI')) over(partition by EXTRACT(day from t.opendt) order by EXTRACT(day from t.opendt)) char_opendt,
+			last_value(to_char(timezone('Europe/Kiev', t.closedt::timestamptz), 'HH24:MI')) over(partition by EXTRACT(day from t.opendt) order by EXTRACT(day from t.opendt)) char_closedt,
+			first_value(to_timestamp(to_char(timezone('Europe/Kiev', t.opendt::timestamptz), 'yyyy.mm.dd HH24:MI'), 'yyyy.mm.dd HH24:MI')) over(partition by EXTRACT(day from t.opendt) order by EXTRACT(day from t.opendt)) opendt,
+			first_value(session) over(partition by EXTRACT(day from t.opendt) order by EXTRACT(day from t.opendt)) session_start,
+			last_value(session) over(partition by EXTRACT(day from t.closedt) order by EXTRACT(day from t.closedt)) session_end,
+			first_value(t.id) over(partition by EXTRACT(day from t.opendt) order by EXTRACT(day from t.opendt)) t_id,
+			last_value(to_timestamp(to_char(timezone('Europe/Kiev', t.closedt::timestamptz), 'yyyy.mm.dd HH24:MI'), 'yyyy.mm.dd HH24:MI')) over(partition by EXTRACT(day from t.opendt) order by EXTRACT(day from t.opendt)) closedt,	
+			t.cashdesk,
+			s.pos
+		 FROM cashdesk_timesheet t
+		 JOIN stuff s on s.id = t.stuff_id				 
+		 WHERE t.cashdesk = $cash_clear
+			AND t.stuff_id = $staff
+			AND t.opendt between cast('$get_date' as timestamp) AND cast('$get_date' as timestamp) + interval '1 month' - interval '1 minute'				 
+	) AS base
+
+	--лига чемпионов
+	LEFT JOIN ( SELECT event, EXTRACT(day from dt) day_dt
+				FROM dir_cashdesk_event 
+				WHERE event = 0
+				AND dt between cast('$get_date' as timestamp) AND cast('$get_date' as timestamp) + interval '1 month' - interval '1 day'						 
+	) AS lchampion ON base.day_dt = lchampion.day_dt
+
+	--собрание
+	LEFT JOIN ( SELECT event, EXTRACT(day from dt) day_dt
+				FROM dir_cashdesk_event 
+				WHERE dir = $director
+				AND dt between cast('$get_date' as timestamp) AND cast('$get_date' as timestamp) + interval '1 month' - interval '1 day'
+				AND event = 1
+	) AS meeting ON base.day_dt = meeting.day_dt
+
+	--собрание минус один день, для половинчатых ночных смен, которые уходят раньше утром из-за собрания
+	LEFT JOIN ( SELECT event, EXTRACT(day from dt - interval '1 day') day_dt
+				FROM dir_cashdesk_event 
+				WHERE dir = $director
+				AND dt between cast('$get_date' as timestamp) AND cast('$get_date' as timestamp) + interval '1 month' - interval '1 day'
+				AND event = 1
+	) AS meeting2 ON base.day_dt = meeting2.day_dt
+
+	--штраф в начале рабочего дня
+	LEFT JOIN ( SELECT EXTRACT(EPOCH FROM(time_to - time_from)) inter,
+					   d.session, 
+					   EXTRACT(day from opendt) day_dt
+				FROM cashdesk_downtime d			
+				join cashdesk_timesheet t on(t.cashdesk = $cash_clear
+							     AND t.stuff_id = $staff
+							     AND t.opendt between cast('$get_date' as timestamp) AND cast('$get_date' as timestamp) + interval '1 month' - interval '1 minute'
+							     AND t.session = d.session)
+				WHERE d.stuff_id = $staff
+				AND delay = true
+				AND validation = false
+				AND del = false
+				AND late = true
+	) AS downtime_s ON base.session_start = downtime_s.session AND base.day_dt = downtime_s.day_dt
+
+	--штраф в конце рабочего дня
+	LEFT JOIN ( SELECT EXTRACT(EPOCH FROM(time_to - time_from)) inter,
+					   d.session, 
+					   EXTRACT(day from opendt) day_dt
+				FROM cashdesk_downtime d
+				join cashdesk_timesheet t on(t.cashdesk = $cash_clear
+							     AND t.stuff_id = $staff
+							     AND t.opendt between cast('$get_date' as timestamp) AND cast('$get_date' as timestamp) + interval '1 month' - interval '1 minute'
+							     AND t.session = d.session)
+				WHERE d.stuff_id = $staff
+				AND delay = true
+				AND validation = false
+				AND del = false
+				AND late = false
+	) AS downtime_e ON base.session_end = downtime_e.session AND base.day_dt = downtime_e.day_dt 
+
+	--оправдание в начале рабочего дня
+	LEFT JOIN ( SELECT EXTRACT(EPOCH FROM(time_to - time_from)) inter,
+					   d.session, 
+					   EXTRACT(day from opendt) day_dt
+				FROM cashdesk_downtime d
+				join cashdesk_timesheet t on(t.cashdesk = $cash_clear
+							     AND t.stuff_id = $staff
+							     AND t.opendt between cast('$get_date' as timestamp) AND cast('$get_date' as timestamp) + interval '1 month' - interval '1 minute'
+							     AND t.session = d.session)
+				WHERE d.stuff_id = $staff
+				AND delay = true
+				AND validation = true
+				AND coalesce(justify, 0) > 0
+				AND del = false
+				AND late = true
+	) AS justify_s ON base.session_start = justify_s.session AND base.day_dt = justify_s.day_dt 
+
+	--оправдание в окнце рабочего дня
+	LEFT JOIN ( SELECT EXTRACT(EPOCH FROM(time_to - time_from)) inter,
+					   d.session, 
+					   EXTRACT(day from opendt) day_dt
+				FROM cashdesk_downtime d
+				join cashdesk_timesheet t on(t.cashdesk = $cash_clear
+							     AND t.stuff_id = $staff
+							     AND t.opendt between cast('$get_date' as timestamp) AND cast('$get_date' as timestamp) + interval '1 month' - interval '1 minute'
+							     AND t.session = d.session)
+				WHERE d.stuff_id = $staff
+				AND delay = true
+				AND validation = true
+				AND coalesce(justify, 0) > 0
+				AND del = false
+				AND late = false
+	) AS justify_e ON base.session_end = justify_e.session AND base.day_dt = justify_e.day_dt
+
+	--основной режим работы
+	JOIN cashdesk_mode AS mode_base ON (
+		mode_base.dir = $director
+		AND mode_base.cashdesk = base.cashdesk
+		AND mode_base.dt_from between cast('$get_date' as timestamp) AND cast('$get_date' as timestamp) + interval '1 month' - interval '1 day'
+		AND mode_base.dop_column = false) 
+
+	--меняющийся в течении месяца режим работы
+	LEFT JOIN ( SELECT  	m.night, 
+				m.cashdesk, 
+				m.cashmode_from, 
+				m.cashmode_to, 
+				m.dop_column,
+				m.securmode_from,
+				m.securmode_to,
+				m.champions_league,
+				EXTRACT(day from m.dt_from) dt_from,
+				EXTRACT(day from m.dt_to) dt_to,
+				m.shift_change
+			FROM cashdesk_mode m
+			WHERE m.dir = $director
+			AND m.cashdesk = $cash_clear
+			AND m.dt_from between cast('$get_date' as timestamp) AND cast('$get_date' as timestamp) + interval '1 month' - interval '1 day'
+			AND m.dop_column = true
+	) AS mode_dop ON base.day_dt >= mode_dop.dt_from AND base.day_dt <= mode_dop.dt_to
+) AS al
