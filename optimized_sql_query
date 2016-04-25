@@ -1,0 +1,34 @@
+-- запрос в MySQL-базу. Вместо таблиц min_purchase и is_rp было 2 громоздких вложеных подзапроса из-за которых запрос под нагрузкой в целом отрабатывал 40 секунд, заменены на 2 таблицы с двумя колонками в каждой,отрабатывает 0,120сек.
+-- эти 2 таблицы, как оказалось, очень пригодились и теперь юзаются через весь проект, переписала много запросов, существенно ускорила работу системы/уменьшила нагрузку на сервер
+
+SELECT  mp.sop_art,                        
+		mp.sale_price, -- цена продажи (последний расчёт)
+		mp.base_price, -- цена без наценки (последний расчёт)
+		mp.price, -- цена с наценкой (последний расчёт)
+		mp.price_ratio, -- наценка в процентах от цены закупки
+		mp.info, -- информация, в которой хранится какой конкурент повлиял на ценообразование
+		mp.color, -- цвет заливки товара
+		mp.rvl_number, -- порядковый номер конкурента
+		ROUND(IF(p.currency = 'USD', p.sop_price2 * $this->usd2uah, p.sop_price2)) AS `sop_price2`, -- цена продажи (актуальная)
+		p.dont_update, -- закрепленный товар
+		p.currency,                           
+		p.sop_code,
+		p.sop_title,
+		CONCAT(UCASE(p.sop_brand), REPLACE(SUBSTRING_INDEX(replace(rtrim(p.sop_title), '/', '%2F'), UCASE(p.sop_brand), -1), ' ', '+')) AS `hot_search`, -- для поиска на хотлайне
+		p.sop_brand,
+		p.sop_cat,
+		r.min_value, -- минимальный порог наценки
+		r.max_value, -- максимальный порог наценки
+		IF(r.threshold > -100, r.threshold, -1000) AS `threshold`, -- порог для отключения товара
+		ff.spl_name, -- поставщик
+		ROUND(IF(ff.product_purchase_price_uah > 0, ff.product_purchase_price_uah, 0)) AS `new_purchase_price`, -- будущая цена закупки в гривнах
+		ROUND(IF(mp.purchase_price > 0, 0, 1)) AS `is_purchase`, -- колонка исключительно для сортировки
+		ROUND(IF(is_rp.price_site > 0, is_rp.price_site, 0)) AS `price_site`, -- рекомендованная цена
+		TRIM(BOTH '/' FROM SUBSTRING_INDEX(p.xpath, '/', -2)) AS `sop_cat_id` -- ID категории (найденный по названию)                        
+FROM sop_margin_products AS `mp` 
+LEFT JOIN sop_price AS `p` USING (sop_art) 
+LEFT JOIN min_purchase AS `ff` ON ff.site_product_id = p.sop_art
+LEFT JOIN sop_margin_range AS `r` ON r.rule_id = $this->rule_id AND ROUND(ff.product_purchase_price_uah) BETWEEN r.min AND r.max
+LEFT JOIN is_rp ON is_rp.sop_code = p.sop_code
+WHERE mp.rule_id = $this->rule_id
+ORDER BY `is_purchase`, `sop_cat_id`, p.sop_brand, p.sop_title
