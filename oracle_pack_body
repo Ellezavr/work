@@ -1,0 +1,83 @@
+CREATE OR REPLACE PACKAGE BODY UNIADMIN.PACK_GRID AS
+
+	--Список отображаемых колонок в гриде 
+	PROCEDURE GetGridColumn
+	(
+		prm_tbl_id     IN  NUMBER,
+		prm_cult       IN  VARCHAR2,
+		io_cursor      OUT ref_cursor
+	) 
+	  IS    
+		v_cult_id      VARCHAR2(10);    
+		v_tbl_id       NUMBER := 7;
+		v_status       NUMBER := 1;
+
+	BEGIN
+	  
+		SELECT ID INTO v_cult_id FROM CMN_CAT_LANG WHERE CULTURE = prm_cult;
+
+		OPEN io_cursor FOR 'SELECT  COALESCE (t.TEXT, tbl_desc.NAME) AS col_name,' ||
+						 '          tbl_desc.TECH_NAME,' ||
+						 '          tbl_desc.IS_FILTER,' ||
+						 '          tbl_desc.IS_TRANSLATE ' ||
+						 'FROM TECH_TABLE_GRID_DESC tbl_desc ' ||                     
+						 'LEFT JOIN CMN_CAT_TRANSLATION t ON t.TABLE_ID = ' || v_tbl_id || ' AND t.LANG_ID = ' || v_cult_id || ' AND t.FIELD_NAME = tbl_desc.TECH_NAME AND t.ROW_ID = tbl_desc.ID ' ||
+						 'WHERE tbl_desc.STATUS = ' || v_status || 
+						 '  AND tbl_desc.TABLE_ID = ' || prm_tbl_id || ' ' ||
+						 'ORDER BY tbl_desc.SORT';
+
+	END GetGridColumn;
+
+
+	--Добавление новой строки в справочник
+	PROCEDURE AddRefRow
+	(
+		prm_tbl_id   IN  NUMBER,
+		prm_user_id  IN  NUMBER,
+		prm_columns  IN  VARCHAR2,
+		prm_values   IN  VARCHAR2,    
+		io_cursor    OUT ref_cursor
+	) 
+	  IS    
+		v_tbl_name   VARCHAR2(50);
+		v_new_id     NUMBER;
+		v_sql        VARCHAR2(400);
+		v_count      NUMBER(10);
+		v_id         NUMBER(10);
+		v_where      VARCHAR2(10);
+		v_tbl_add    VARCHAR2(10);
+
+	BEGIN
+
+		SELECT COUNT(USER_ID) INTO v_count FROM REL_ALLOWED_TABLE WHERE USER_ID = prm_user_id AND TABLE_ID = prm_tbl_id;
+
+		IF(v_count = 0)
+			THEN 
+				SELECT role_id INTO v_id FROM CMN_LIST_USER WHERE id = prm_user_id;
+				v_where := 'ROLE_ID';
+			ELSE
+				v_id := prm_user_id;
+				v_where := 'USER_ID';
+		END IF;
+
+		EXECUTE IMMEDIATE  'SELECT TABLE_ADD FROM REL_ALLOWED_TABLE WHERE ' || v_where || ' = ' || v_id || ' AND TABLE_ID = ' || prm_tbl_id INTO v_tbl_add;
+
+		IF(v_tbl_add = 0)
+			THEN  
+				v_new_id := 0;
+			ELSE
+				SELECT TECH_NAME INTO v_tbl_name FROM CAT_TABLES WHERE ID = prm_tbl_id;
+
+				v_sql := 'INSERT INTO ' || v_tbl_name || ' ('||prm_columns||') VALUES ('||prm_values||') RETURNING id INTO :1';
+
+				EXECUTE IMMEDIATE v_sql RETURNING INTO v_new_id;
+
+				EXECUTE IMMEDIATE 'INSERT INTO REL_ALLOWED_TABLE_ROW (' || v_where || ',TABLE_ID,ROW_ID) VALUES (:1,:2,:3)' USING prm_user_id,prm_tbl_id,v_new_id;
+		END IF;
+
+		OPEN io_cursor FOR 'SELECT '|| v_new_id ||' AS new_id FROM CAT_TABLES WHERE ROWNUM = 1';
+
+	END AddRefRow;
+
+
+END PACK_GRID;
